@@ -14,7 +14,7 @@ RUN nohup ollama serve > /var/log/ollama.log 2>&1 & \
     sleep 10 && \
     # Pull both models
     ollama pull deepseek-r1:8b && \
-    ollama pull llama3.2 && \
+    ollama pull llama3.2:3b && \
     # Wait for models to be fully downloaded
     sleep 60
 

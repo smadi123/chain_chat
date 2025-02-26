@@ -2,12 +2,10 @@ from langchain_ollama.chat_models import ChatOllama
 import streamlit as st
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_community.chat_message_histories import StreamlitChatMessageHistory
-from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
 
 # Initialize both LLMs
-llm1 = ChatOllama(model="llama3.2", base_url="http://backend:11434")
+llm1 = ChatOllama(model="llama3.2:3b", base_url="http://backend:11434")
 llm2 = ChatOllama(model="deepseek-r1:8b", base_url="http://backend:11434")
 
 # Create translation prompt for Arabic to English
@@ -40,29 +38,37 @@ translate_to_arabic_prompt = ChatPromptTemplate.from_messages([
     ("human", "{english_response}")
 ])
 
-# Set up the sequential chain
-def process_query(inputs):
-    # Step 1: Translate from Arabic to English
-    english_query = translate_to_english_prompt.invoke({"input": inputs["input"]}) | llm1 | StrOutputParser()
-    
-    # Step 2: Generate response in English
-    english_response = english_response_prompt.invoke({
-        "english_query": english_query,
-        "chat_history": inputs.get("chat_history", [])
-    }) | llm2 | StrOutputParser()
-    
-    # Step 3: Translate from English to Arabic
-    return translate_to_arabic_prompt.invoke({"english_response": english_response}) | llm1
+# Create the translation chains
+ar_to_en_chain = translate_to_english_prompt | llm1 | StrOutputParser()
+en_to_ar_chain = translate_to_arabic_prompt | llm1 | StrOutputParser()
 
-# Create the chain with history
+# Set up the response chain
+def generate_english_response(english_query, history):
+    prompt_value = english_response_prompt.invoke({
+        "english_query": english_query,
+        "chat_history": history
+    })
+    response = llm2.invoke(prompt_value)
+    return response.content
+
+# Define the complete chain with history
 history = StreamlitChatMessageHistory()
 
-chain_with_history = RunnableWithMessageHistory(
-    RunnablePassthrough.assign(output=process_query),
-    lambda session_id: history,
-    input_messages_key="input",
-    history_messages_key="chat_history",
-)
+def sequential_chain(inputs, config):
+    # Extract chat history from inputs
+    chat_history = inputs.get("chat_history", [])
+    
+    # Step 1: Translate Arabic to English
+    english_query = ar_to_en_chain.invoke({"input": inputs["input"]})
+    
+    # Step 2: Generate English response
+    english_response = generate_english_response(english_query, chat_history)
+    
+    # Step 3: Translate English to Arabic
+    arabic_response = en_to_ar_chain.invoke({"english_response": english_response})
+    
+    # Return the result
+    return {"output": arabic_response}
 
 # Set up Streamlit UI with RTL support
 st.markdown(
@@ -102,19 +108,24 @@ if question:
             unsafe_allow_html=True
         )
     
+    # Add message to history
+    history.add_user_message(question)
+    
     # Process and stream response
     with st.chat_message("assistant"):
-        response_placeholder = st.empty()
-        full_response = ""
+        response_container = st.empty()
         
-        # Process the chain and stream results
-        for chunk in chain_with_history.stream(
-            {"input": question}, 
-            config={"configurable": {"session_id": "any"}}
-        ):
-            if chunk.get("output"):
-                full_response += chunk["output"]
-                response_placeholder.markdown(
-                    f'<div style="text-align: right; direction: rtl;">{full_response}</div>',
-                    unsafe_allow_html=True
-                )
+        # Process without streaming for simplicity (to fix the error)
+        response = sequential_chain(
+            {"input": question, "chat_history": history.messages}, 
+            {"configurable": {"session_id": "any"}}
+        )
+        
+        arabic_response = response["output"]
+        response_container.markdown(
+            f'<div style="text-align: right; direction: rtl;">{arabic_response}</div>',
+            unsafe_allow_html=True
+        )
+        
+        # Add assistant response to history
+        history.add_ai_message(arabic_response)
