@@ -2,73 +2,40 @@ from langchain_ollama.chat_models import ChatOllama
 import streamlit as st
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_community.chat_message_histories import StreamlitChatMessageHistory
-from langchain_core.output_parsers import StrOutputParser
 
-# Initialize both LLMs
-llm1 = ChatOllama(model="llama3.2:3b", base_url="http://backend:11434")
-llm2 = ChatOllama(model="deepseek-r1:8b", base_url="http://backend:11434")
+# Initialize a single LLM - deepseek tends to have better multilingual capabilities
+llm = ChatOllama(
+    model="deepseek-r1:8b", 
+    base_url="http://backend:11434",
+    streaming=True
+)
 
-# Create translation prompt for Arabic to English
-translate_to_english_prompt = ChatPromptTemplate.from_messages([
+# Create an all-in-one prompt that handles translation and response
+all_in_one_prompt = ChatPromptTemplate.from_messages([
     (
         "system",
-        "You are a professional translator. Translate the following Arabic text to English accurately. "
-        "Only provide the translated text without any additional comments or explanations."
+        """You are an advanced AI assistant capable of understanding and responding in both Arabic and English.
+
+Process each user query through these steps:
+1. If the input is in Arabic, first understand it as is
+2. Generate a thoughtful, informative response
+3. If the original query was in Arabic, provide your response in Arabic with appropriate emojis
+
+Important:
+- Your response should be direct and concise
+- Include emojis in Arabic responses to enhance readability
+- Maintain the same RTL formatting as the user's input for Arabic
+- Stream your response token by token as you generate it"""
     ),
+    MessagesPlaceholder(variable_name="chat_history"),
     ("human", "{input}")
 ])
 
-# Create English response generation prompt
-english_response_prompt = ChatPromptTemplate.from_messages([
-    (
-        "system",
-        "You are an AI assistant answering questions in English. Provide informative and helpful responses."
-    ),
-    MessagesPlaceholder(variable_name="chat_history"),
-    ("human", "{english_query}")
-])
+# Create the chain
+chain = all_in_one_prompt | llm
 
-# Create translation prompt for English to Arabic
-translate_to_arabic_prompt = ChatPromptTemplate.from_messages([
-    (
-        "system",
-        "You are a professional translator. Translate the following English text to Arabic accurately. "
-        "Make the translation fluent and natural. Include appropriate emojis to enhance the message."
-    ),
-    ("human", "{english_response}")
-])
-
-# Create the translation chains
-ar_to_en_chain = translate_to_english_prompt | llm1 | StrOutputParser()
-en_to_ar_chain = translate_to_arabic_prompt | llm1 | StrOutputParser()
-
-# Set up the response chain
-def generate_english_response(english_query, history):
-    prompt_value = english_response_prompt.invoke({
-        "english_query": english_query,
-        "chat_history": history
-    })
-    response = llm2.invoke(prompt_value)
-    return response.content
-
-# Define the complete chain with history
+# Set up history
 history = StreamlitChatMessageHistory()
-
-def sequential_chain(inputs, config):
-    # Extract chat history from inputs
-    chat_history = inputs.get("chat_history", [])
-    
-    # Step 1: Translate Arabic to English
-    english_query = ar_to_en_chain.invoke({"input": inputs["input"]})
-    
-    # Step 2: Generate English response
-    english_response = generate_english_response(english_query, chat_history)
-    
-    # Step 3: Translate English to Arabic
-    arabic_response = en_to_ar_chain.invoke({"english_response": english_response})
-    
-    # Return the result
-    return {"output": arabic_response}
 
 # Set up Streamlit UI with RTL support
 st.markdown(
@@ -114,18 +81,20 @@ if question:
     # Process and stream response
     with st.chat_message("assistant"):
         response_container = st.empty()
+        full_response = ""
         
-        # Process without streaming for simplicity (to fix the error)
-        response = sequential_chain(
-            {"input": question, "chat_history": history.messages}, 
-            {"configurable": {"session_id": "any"}}
-        )
-        
-        arabic_response = response["output"]
-        response_container.markdown(
-            f'<div style="text-align: right; direction: rtl;">{arabic_response}</div>',
-            unsafe_allow_html=True
-        )
+        # Stream the response directly to the user
+        for chunk in chain.stream({
+            "input": question,
+            "chat_history": history.messages
+        }):
+            if hasattr(chunk, 'content'):
+                content_chunk = chunk.content
+                full_response += content_chunk
+                response_container.markdown(
+                    f'<div style="text-align: right; direction: rtl;">{full_response}</div>',
+                    unsafe_allow_html=True
+                )
         
         # Add assistant response to history
-        history.add_ai_message(arabic_response)
+        history.add_ai_message(full_response)
